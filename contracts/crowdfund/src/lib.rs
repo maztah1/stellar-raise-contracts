@@ -16,6 +16,10 @@ mod auth_tests;
 pub mod campaign_goal_minimum;
 #[cfg(test)]
 mod campaign_goal_minimum_test;
+pub mod contract_state_size;
+#[cfg(test)]
+#[path = "contract_state_size.test.rs"]
+mod contract_state_size_test;
 pub mod contribute_error_handling;
 #[cfg(test)]
 mod contribute_error_handling_tests;
@@ -194,6 +198,10 @@ impl CrowdfundContract {
         }
 
         if let Some(bg_description) = bonus_goal_description {
+            if let Err(err) = contract_state_size::validate_bonus_goal_description(&bg_description)
+            {
+                panic!("{}", err);
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::BonusGoalDescription, &bg_description);
@@ -256,6 +264,19 @@ impl CrowdfundContract {
             return Err(ContractError::CampaignEnded);
         }
 
+        let mut contributors: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Contributors)
+            .unwrap_or_else(|| Vec::new(&env));
+        let is_new_contributor = !contributors.contains(&contributor);
+        if is_new_contributor {
+            if let Err(err) = contract_state_size::validate_contributor_capacity(contributors.len())
+            {
+                panic!("{}", err);
+            }
+        }
+
         let token_address: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let token_client = token::Client::new(&env, &token_address);
 
@@ -304,13 +325,7 @@ impl CrowdfundContract {
             }
         }
 
-        let mut contributors: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Contributors)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        if !contributors.contains(&contributor) {
+        if is_new_contributor {
             contributors.push_back(contributor.clone());
             env.storage()
                 .persistent()
@@ -362,6 +377,18 @@ impl CrowdfundContract {
             return Err(ContractError::CampaignEnded);
         }
 
+        let mut pledgers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pledgers)
+            .unwrap_or_else(|| Vec::new(&env));
+        let is_new_pledger = !pledgers.contains(&pledger);
+        if is_new_pledger {
+            if let Err(err) = contract_state_size::validate_pledger_capacity(pledgers.len()) {
+                panic!("{}", err);
+            }
+        }
+
         // Update the pledger's running total.
         let pledge_key = DataKey::Pledge(pledger.clone());
         let prev: i128 = env.storage().persistent().get(&pledge_key).unwrap_or(0);
@@ -381,12 +408,7 @@ impl CrowdfundContract {
             .set(&DataKey::TotalPledged, &(total_pledged + amount));
 
         // Track pledger address if new.
-        let mut pledgers: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Pledgers)
-            .unwrap_or_else(|| Vec::new(&env));
-        if !pledgers.contains(&pledger) {
+        if is_new_pledger {
             pledgers.push_back(pledger.clone());
             env.storage()
                 .persistent()
@@ -675,15 +697,6 @@ impl CrowdfundContract {
     pub fn refund_single(env: Env, contributor: Address) -> Result<(), ContractError> {
         contributor.require_auth();
 
-    /// Claim a refund for a single contributor (pull-based).
-    ///
-    /// # Errors
-    /// * [`ContractError::CampaignStillActive`] when deadline has not passed.
-    /// * [`ContractError::GoalReached`] when the funding goal was met.
-    /// * [`ContractError::NothingToRefund`] when the contributor has no balance.
-    pub fn refund_single(env: Env, contributor: Address) -> Result<(), ContractError> {
-        contributor.require_auth();
-
         // A successful or cancelled campaign cannot be refunded.
         let status: Status = env.storage().instance().get(&DataKey::Status).unwrap();
         if status == Status::Successful || status == Status::Cancelled {
@@ -717,15 +730,6 @@ impl CrowdfundContract {
         }
 
         // ── Checks-Effects-Interactions ──────────────────────────────────────
-        let token_address: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let token_client = token::Client::new(&env, &token_address);
-        refund_single_transfer(
-            &token_client,
-            &env.current_contract_address(),
-            &contributor,
-            amount,
-        );
-
         env.storage().persistent().set(&contribution_key, &0i128);
         env.storage()
             .persistent()
@@ -738,7 +742,12 @@ impl CrowdfundContract {
 
         let token_address: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let token_client = token::Client::new(&env, &token_address);
-        token_client.transfer(&env.current_contract_address(), &contributor, &amount);
+        refund_single_transfer(
+            &token_client,
+            &env.current_contract_address(),
+            &contributor,
+            amount,
+        );
 
         env.events()
             .publish(("campaign", "refund_single"), (contributor, amount));
@@ -821,14 +830,53 @@ impl CrowdfundContract {
         // Track which fields were updated for the event.
         let mut updated_fields: Vec<Symbol> = Vec::new(&env);
 
+        let current_title = env.storage().instance().get::<_, String>(&DataKey::Title);
+        let current_description = env
+            .storage()
+            .instance()
+            .get::<_, String>(&DataKey::Description);
+        let current_socials = env
+            .storage()
+            .instance()
+            .get::<_, String>(&DataKey::SocialLinks);
+
+        let title_length = title
+            .as_ref()
+            .map(|value| value.len())
+            .or_else(|| current_title.as_ref().map(|value| value.len()))
+            .unwrap_or(0);
+        let description_length = description
+            .as_ref()
+            .map(|value| value.len())
+            .or_else(|| current_description.as_ref().map(|value| value.len()))
+            .unwrap_or(0);
+        let socials_length = socials
+            .as_ref()
+            .map(|value| value.len())
+            .or_else(|| current_socials.as_ref().map(|value| value.len()))
+            .unwrap_or(0);
+        if let Err(err) = contract_state_size::validate_metadata_total_length(
+            title_length,
+            description_length,
+            socials_length,
+        ) {
+            panic!("{}", err);
+        }
+
         // Update title if provided.
         if let Some(new_title) = title {
+            if let Err(err) = contract_state_size::validate_title(&new_title) {
+                panic!("{}", err);
+            }
             env.storage().instance().set(&DataKey::Title, &new_title);
             updated_fields.push_back(Symbol::new(&env, "title"));
         }
 
         // Update description if provided.
         if let Some(new_description) = description {
+            if let Err(err) = contract_state_size::validate_description(&new_description) {
+                panic!("{}", err);
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::Description, &new_description);
@@ -837,6 +885,9 @@ impl CrowdfundContract {
 
         // Update social links if provided.
         if let Some(new_socials) = socials {
+            if let Err(err) = contract_state_size::validate_social_links(&new_socials) {
+                panic!("{}", err);
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::SocialLinks, &new_socials);
@@ -867,6 +918,12 @@ impl CrowdfundContract {
             .instance()
             .get(&DataKey::Roadmap)
             .unwrap_or_else(|| Vec::new(&env));
+        if let Err(err) = contract_state_size::validate_roadmap_capacity(roadmap.len()) {
+            panic!("{}", err);
+        }
+        if let Err(err) = contract_state_size::validate_roadmap_description(&description) {
+            panic!("{}", err);
+        }
 
         roadmap.push_back(RoadmapItem {
             date,
@@ -903,6 +960,9 @@ impl CrowdfundContract {
             .instance()
             .get(&DataKey::StretchGoals)
             .unwrap_or_else(|| Vec::new(&env));
+        if let Err(err) = contract_state_size::validate_stretch_goal_capacity(stretch_goals.len()) {
+            panic!("{}", err);
+        }
 
         stretch_goals.push_back(milestone);
         env.storage()
