@@ -30,6 +30,18 @@ impl SorobanSdkMinor {
     /// @param  admin The administrator address to store.
     pub fn init(env: Env, admin: Address) {
         admin.require_auth();
+        // Prevent re-initialization: if Admin is already present, refuse to overwrite.
+        // This enforces a one-time init semantics and closes a potential
+        // accidental takeover/reinitialization attack vector.
+        if env
+            .storage()
+            .instance()
+            .get::<Address>(&DataKey::Admin)
+            .is_some()
+        {
+            panic!("already initialized");
+        }
+
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 

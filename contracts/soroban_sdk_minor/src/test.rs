@@ -35,15 +35,16 @@ fn test_init_stores_admin() {
 
 /// Different admins produce different stored values.
 #[test]
-fn test_init_different_admins() {
+#[should_panic(expected = "already initialized")]
+fn test_init_different_admins_panics_on_reinit() {
+    // With one-time init semantics, attempting to re-init should panic.
     let (env, client) = setup();
     let admin1 = Address::generate(&env);
     let admin2 = Address::generate(&env);
     client.init(&admin1);
     assert_eq!(client.get_admin(), admin1);
-    // Re-init with a different admin (no guard in this contract).
+    // Re-init should panic
     client.init(&admin2);
-    assert_eq!(client.get_admin(), admin2);
 }
 
 // ── check_auth ────────────────────────────────────────────────────────────────
@@ -80,13 +81,15 @@ fn test_get_admin_panics_when_not_initialized() {
 
 /// get_admin returns the most recently set admin after re-init.
 #[test]
-fn test_get_admin_after_reinit() {
+#[should_panic(expected = "already initialized")]
+fn test_get_admin_panics_on_reinit_attempt() {
+    // Attempting to re-init should panic before a second admin is stored.
     let (env, client) = setup();
     let admin1 = Address::generate(&env);
     let admin2 = Address::generate(&env);
     client.init(&admin1);
+    // This call should panic
     client.init(&admin2);
-    assert_eq!(client.get_admin(), admin2);
 }
 
 // ── logging bounds / SDK v22 patterns ────────────────────────────────────────
