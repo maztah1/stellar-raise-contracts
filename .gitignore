@@ -13,3 +13,9 @@ Thumbs.db
 
 # Soroban
 *.d
+.kiro/
+
+contracts/*/test_snapshots/
+node_modules
+coverage/
+
