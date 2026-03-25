@@ -6,10 +6,22 @@ use soroban_sdk::{
     contract, contractclient, contractimpl, contracttype, token, Address, Env, String,
     Symbol, Vec,
 };
+pub mod cargo_toml_rust;
+#[cfg(test)]
+#[path = "cargo_toml_rust.test.rs"]
+mod cargo_toml_rust_test;
+
+pub mod contract_state_size;
+#[cfg(test)]
+mod contract_state_size_test;
+
 pub mod refund_single_token;
-pub mod withdraw_event_emission;
-use refund_single_token::refund_single_transfer;
-use withdraw_event_emission::{emit_withdrawal_event, mint_nfts_in_batch};
+use refund_single_token::{
+    execute_refund_single, refund_single_transfer, validate_refund_preconditions,
+};
+#[cfg(test)]
+#[path = "refund_single_token.test.rs"]
+mod refund_single_token_test;
 
 pub mod soroban_sdk_minor;
 
@@ -18,11 +30,14 @@ mod auth_tests;
 pub mod campaign_goal_minimum;
 #[cfg(test)]
 mod campaign_goal_minimum_test;
+pub mod contract_state_size;
+#[cfg(test)]
+#[path = "contract_state_size.test.rs"]
+mod contract_state_size_test;
 pub mod contribute_error_handling;
 #[cfg(test)]
 mod contribute_error_handling_tests;
-#[cfg(test)]
-mod proptest_generator_boundary;
+pub mod proptest_generator_boundary;
 #[cfg(test)]
 mod proptest_generator_boundary_tests;
 #[cfg(test)]
@@ -132,6 +147,12 @@ pub enum ContractError {
     Overflow = 6,
     /// Returned by `refund_single` when the caller has no contribution to refund.
     NothingToRefund = 7,
+    /// Returned by `contribute` when `amount` is zero.
+    ZeroAmount = 8,
+    /// Returned by `contribute` when `amount` is below `min_contribution`.
+    BelowMinimum = 9,
+    /// Returned by `contribute` when the campaign is not active.
+    CampaignNotActive = 10,
 }
 
 #[contractclient(name = "NftContractClient")]
@@ -196,6 +217,10 @@ impl CrowdfundContract {
         }
 
         if let Some(bg_description) = bonus_goal_description {
+            if let Err(err) = contract_state_size::validate_bonus_goal_description(&bg_description)
+            {
+                panic!("{}", err);
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::BonusGoalDescription, &bg_description);
@@ -240,9 +265,19 @@ impl CrowdfundContract {
     /// Contribute tokens to the campaign.
     ///
     /// The contributor must authorize the call. Contributions are rejected
-    /// after the deadline has passed.
+    /// after the deadline has passed or if the campaign is not active.
     pub fn contribute(env: Env, contributor: Address, amount: i128) -> Result<(), ContractError> {
         contributor.require_auth();
+
+        // Guard: campaign must be active.
+        let status: Status = env.storage().instance().get(&DataKey::Status).unwrap();
+        if status != Status::Active {
+            return Err(ContractError::CampaignNotActive);
+        }
+
+        if amount == 0 {
+            return Err(ContractError::ZeroAmount);
+        }
 
         let min_contribution: i128 = env
             .storage()
@@ -250,12 +285,25 @@ impl CrowdfundContract {
             .get(&DataKey::MinContribution)
             .unwrap();
         if amount < min_contribution {
-            panic!("amount below minimum");
+            return Err(ContractError::BelowMinimum);
         }
 
         let deadline: u64 = env.storage().instance().get(&DataKey::Deadline).unwrap();
         if env.ledger().timestamp() > deadline {
             return Err(ContractError::CampaignEnded);
+        }
+
+        let mut contributors: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Contributors)
+            .unwrap_or_else(|| Vec::new(&env));
+        let is_new_contributor = !contributors.contains(&contributor);
+        if is_new_contributor {
+            if let Err(err) = contract_state_size::validate_contributor_capacity(contributors.len())
+            {
+                panic!("{}", err);
+            }
         }
 
         let token_address: Address = env.storage().instance().get(&DataKey::Token).unwrap();
@@ -313,6 +361,8 @@ impl CrowdfundContract {
             .unwrap_or_else(|| Vec::new(&env));
 
         if !contributors.contains(&contributor) {
+            // Enforce contributor list size limit before appending.
+            contract_state_size::check_contributor_limit(&env).expect("contributor limit exceeded");
             contributors.push_back(contributor.clone());
             env.storage()
                 .persistent()
@@ -364,6 +414,18 @@ impl CrowdfundContract {
             return Err(ContractError::CampaignEnded);
         }
 
+        let mut pledgers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pledgers)
+            .unwrap_or_else(|| Vec::new(&env));
+        let is_new_pledger = !pledgers.contains(&pledger);
+        if is_new_pledger {
+            if let Err(err) = contract_state_size::validate_pledger_capacity(pledgers.len()) {
+                panic!("{}", err);
+            }
+        }
+
         // Update the pledger's running total.
         let pledge_key = DataKey::Pledge(pledger.clone());
         let prev: i128 = env.storage().persistent().get(&pledge_key).unwrap_or(0);
@@ -389,6 +451,8 @@ impl CrowdfundContract {
             .get(&DataKey::Pledgers)
             .unwrap_or_else(|| Vec::new(&env));
         if !pledgers.contains(&pledger) {
+            // Enforce pledger list size limit before appending.
+            contract_state_size::check_pledger_limit(&env).expect("pledger limit exceeded");
             pledgers.push_back(pledger.clone());
             env.storage()
                 .persistent()
@@ -545,7 +609,7 @@ impl CrowdfundContract {
     ///
     /// **This function is deprecated as of contract v3 and will be removed in a future version.**
     ///
-    /// Use [`refund_single`] instead. The pull-based model is preferred because:
+    /// Use `refund_single` instead. The pull-based model is preferred because:
     /// - It avoids unbounded iteration over the contributors list (gas safety).
     /// - Each contributor controls their own refund timing.
     /// - It is composable with scripts and automation tooling.
@@ -609,13 +673,6 @@ impl CrowdfundContract {
         Ok(())
     }
 
-    /// Refund a single contributor after campaign failure.
-    ///
-    /// @notice Transfers the full stored contribution from contract to contributor.
-    /// @dev The transfer direction is explicitly contract -> contributor to prevent
-    ///      script-level parameter typos and accidental reverse transfer attempts.
-    /// @param contributor Contributor address to refund.
-    /// @return Ok(()) when the refund is complete or nothing is owed.
     /// Claim a refund for a single contributor (pull-based).
     ///
     /// Each contributor independently claims their own refund after the campaign
@@ -702,6 +759,10 @@ impl CrowdfundContract {
             .publish(("campaign", "refund_single"), (contributor, amount));
 
         Ok(())
+    pub fn refund_single(env: Env, contributor: Address) -> Result<(), ContractError> {
+        contributor.require_auth();
+        let amount = validate_refund_preconditions(&env, &contributor)?;
+        execute_refund_single(&env, &contributor, amount)
     }
 
     /// Cancel the campaign and refund all contributors — callable only by
@@ -716,13 +777,31 @@ impl CrowdfundContract {
         creator.require_auth();
 
         let token_address: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let _token_client = token::Client::new(&env, &token_address);
+        let token_client = token::Client::new(&env, &token_address);
 
-        let _contributors: Vec<Address> = env
+        let contributors: Vec<Address> = env
             .storage()
             .persistent()
             .get(&DataKey::Contributors)
-            .unwrap();
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for contributor in contributors.iter() {
+            let contribution_key = DataKey::Contribution(contributor.clone());
+            let amount: i128 = env
+                .storage()
+                .persistent()
+                .get(&contribution_key)
+                .unwrap_or(0);
+            if amount > 0 {
+                env.storage().persistent().set(&contribution_key, &0i128);
+                refund_single_transfer(
+                    &token_client,
+                    &env.current_contract_address(),
+                    &contributor,
+                    amount,
+                );
+            }
+        }
 
         env.storage().instance().set(&DataKey::TotalRaised, &0i128);
         env.storage()
@@ -779,14 +858,53 @@ impl CrowdfundContract {
         // Track which fields were updated for the event.
         let mut updated_fields: Vec<Symbol> = Vec::new(&env);
 
+        let current_title = env.storage().instance().get::<_, String>(&DataKey::Title);
+        let current_description = env
+            .storage()
+            .instance()
+            .get::<_, String>(&DataKey::Description);
+        let current_socials = env
+            .storage()
+            .instance()
+            .get::<_, String>(&DataKey::SocialLinks);
+
+        let title_length = title
+            .as_ref()
+            .map(|value| value.len())
+            .or_else(|| current_title.as_ref().map(|value| value.len()))
+            .unwrap_or(0);
+        let description_length = description
+            .as_ref()
+            .map(|value| value.len())
+            .or_else(|| current_description.as_ref().map(|value| value.len()))
+            .unwrap_or(0);
+        let socials_length = socials
+            .as_ref()
+            .map(|value| value.len())
+            .or_else(|| current_socials.as_ref().map(|value| value.len()))
+            .unwrap_or(0);
+        if let Err(err) = contract_state_size::validate_metadata_total_length(
+            title_length,
+            description_length,
+            socials_length,
+        ) {
+            panic!("{}", err);
+        }
+
         // Update title if provided.
         if let Some(new_title) = title {
+            if let Err(err) = contract_state_size::validate_title(&new_title) {
+                panic!("{}", err);
+            }
             env.storage().instance().set(&DataKey::Title, &new_title);
             updated_fields.push_back(Symbol::new(&env, "title"));
         }
 
         // Update description if provided.
         if let Some(new_description) = description {
+            if let Err(err) = contract_state_size::validate_description(&new_description) {
+                panic!("{}", err);
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::Description, &new_description);
@@ -795,6 +913,9 @@ impl CrowdfundContract {
 
         // Update social links if provided.
         if let Some(new_socials) = socials {
+            if let Err(err) = contract_state_size::validate_social_links(&new_socials) {
+                panic!("{}", err);
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::SocialLinks, &new_socials);
@@ -820,11 +941,21 @@ impl CrowdfundContract {
             panic!("description cannot be empty");
         }
 
+        // Enforce string length and roadmap list size limits.
+        contract_state_size::check_string_len(&description).expect("description too long");
+        contract_state_size::check_roadmap_limit(&env).expect("roadmap limit exceeded");
+
         let mut roadmap: Vec<RoadmapItem> = env
             .storage()
             .instance()
             .get(&DataKey::Roadmap)
             .unwrap_or_else(|| Vec::new(&env));
+        if let Err(err) = contract_state_size::validate_roadmap_capacity(roadmap.len()) {
+            panic!("{}", err);
+        }
+        if let Err(err) = contract_state_size::validate_roadmap_description(&description) {
+            panic!("{}", err);
+        }
 
         roadmap.push_back(RoadmapItem {
             date,
@@ -856,11 +987,17 @@ impl CrowdfundContract {
             panic!("stretch goal must be greater than primary goal");
         }
 
+        // Enforce stretch-goal list size limit.
+        contract_state_size::check_stretch_goal_limit(&env).expect("stretch goal limit exceeded");
+
         let mut stretch_goals: Vec<i128> = env
             .storage()
             .instance()
             .get(&DataKey::StretchGoals)
             .unwrap_or_else(|| Vec::new(&env));
+        if let Err(err) = contract_state_size::validate_stretch_goal_capacity(stretch_goals.len()) {
+            panic!("{}", err);
+        }
 
         stretch_goals.push_back(milestone);
         env.storage()
