@@ -19,6 +19,7 @@ mod withdraw_event_emission_test;
 
 pub mod contract_state_size;
 #[cfg(test)]
+#[path = "contract_state_size.test.rs"]
 mod contract_state_size_test;
 
 
@@ -40,6 +41,12 @@ pub mod admin_upgrade_mechanism;
 pub mod soroban_sdk_minor;
 #[cfg(test)]
 mod soroban_sdk_minor_test;
+
+pub mod withdraw_event_emission;
+use withdraw_event_emission::{emit_withdrawal_event, mint_nfts_in_batch};
+#[cfg(test)]
+mod withdraw_event_emission_test;
+
 #[path = "stellar_token_minter_test.rs"]
 mod stellar_token_minter_test;
 
@@ -166,6 +173,8 @@ pub enum DataKey {
     /// Platform fee configuration.
     PlatformConfig,
     NFTContract,
+    /// Decimal precision of the campaign token (e.g. 7 for XLM, 6 for USDC).
+    TokenDecimals,
 }
 
 // ── Contract Error ──────────────────────────────────────────────────────────
@@ -276,6 +285,12 @@ impl CrowdfundContract {
         if env.storage().instance().has(&DataKey::Creator) {
             return Err(ContractError::AlreadyInitialized);
         }
+
+        // Validate that `token` is a real SEP-41 contract by reading its decimals.
+        // This call will trap if the address does not implement the token interface,
+        // preventing campaigns from being initialized with arbitrary/invalid addresses.
+        let token_client = token::Client::new(&env, &token);
+        let token_decimals: u32 = token_client.decimals();
 
         creator.require_auth();
         crate::crowdfund_initialize_function::validate_initialize_inputs(
@@ -468,7 +483,7 @@ impl CrowdfundContract {
             .get(&DataKey::MinContribution)
             .unwrap();
         if amount < min_contribution {
-            return Err(ContractError::AmountTooLow);
+            panic!("amount below minimum");
         }
 
         let deadline: u64 = env.storage().instance().get(&DataKey::Deadline).unwrap();
@@ -695,62 +710,6 @@ impl CrowdfundContract {
 
         // Single withdrawal event carrying payout, fee info, and mint count.
         emit_withdrawal_event(&env, &creator, creator_payout, nft_minted_count);
-
-        Ok(())
-    }
-
-    /// Refund all contributors in a single batch transaction.
-    ///
-    /// # Deprecation Notice
-    ///
-    /// **This function is deprecated as of contract v3 and will be removed in a future version.**
-    ///
-    /// Use `refund_single` instead. The pull-based model is preferred because:
-    /// - It avoids unbounded iteration over the contributors list (gas safety).
-    /// - Each contributor controls their own refund timing.
-    /// - It is composable with scripts and automation tooling.
-    ///
-    /// This function remains callable for backward compatibility but may be
-    /// removed in a future upgrade. Scripts and integrations should migrate to
-    /// `refund_single`.
-    #[allow(deprecated)]
-    pub fn refund(env: Env) -> Result<(), ContractError> {
-        let status: Status = env.storage().instance().get(&DataKey::Status).unwrap();
-        if status != Status::Expired {
-            panic!("campaign must be in Expired state to refund");
-        }
-
-        let token_address: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let token_client = token::Client::new(&env, &token_address);
-
-        let contributors: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Contributors)
-            .unwrap();
-
-        for contributor in contributors.iter() {
-            let contribution_key = DataKey::Contribution(contributor.clone());
-            let amount: i128 = env
-                .storage()
-                .persistent()
-                .get(&contribution_key)
-                .unwrap_or(0);
-            if amount > 0 {
-                refund_single_transfer(
-                    &token_client,
-                    &env.current_contract_address(),
-                    &contributor,
-                    amount,
-                );
-                env.storage().persistent().set(&contribution_key, &0i128);
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&contribution_key, 100, 100);
-            }
-        }
-
-        env.storage().instance().set(&DataKey::TotalRaised, &0i128);
 
         Ok(())
     }
@@ -1297,6 +1256,18 @@ impl CrowdfundContract {
     /// Returns the token contract address used for contributions.
     pub fn token(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Token).unwrap()
+    }
+
+    /// Returns the decimal precision of the campaign token.
+    ///
+    /// All goal and contribution amounts are expressed in the token's smallest
+    /// unit (e.g. stroops for XLM, micro-USDC for USDC). Use this value to
+    /// convert raw amounts to human-readable form: `amount / 10^decimals`.
+    pub fn token_decimals(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TokenDecimals)
+            .unwrap()
     }
 
     /// Returns the configured NFT contract address, if any.
