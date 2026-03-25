@@ -5,6 +5,9 @@ use soroban_sdk::{
     contract, contractclient, contractimpl, contracttype, token, Address, Env, String,
     Symbol, Vec,
 };
+
+pub mod crowdfund_initialize_function;
+
 pub mod cargo_toml_rust;
 #[cfg(test)]
 #[path = "cargo_toml_rust.test.rs"]
@@ -13,6 +16,7 @@ mod cargo_toml_rust_test;
 pub mod contract_state_size;
 #[cfg(test)]
 mod contract_state_size_test;
+
 
 pub mod refund_single_token;
 use refund_single_token::{
@@ -42,7 +46,14 @@ pub mod contribute_error_handling;
 mod contribute_error_handling_tests;
 pub mod proptest_generator_boundary;
 #[cfg(test)]
+
+mod crowdfund_initialize_function_test;
+#[cfg(test)]
+mod proptest_generator_boundary;
+#[cfg(test)]
+
 #[path = "proptest_generator_boundary.test.rs"]
+
 mod proptest_generator_boundary_tests;
 pub mod stellar_token_minter;
 #[cfg(test)]
@@ -176,12 +187,25 @@ pub enum ContractError {
     Overflow = 6,
     /// Returned by `refund_single` when the caller has no contribution to refund.
     NothingToRefund = 7,
+
+    /// Returned by `initialize` when `goal < MIN_GOAL_AMOUNT`.
+    InvalidGoal = 8,
+    /// Returned by `initialize` when `min_contribution < MIN_CONTRIBUTION_AMOUNT`.
+    InvalidMinContribution = 9,
+    /// Returned by `initialize` when `deadline` is too soon.
+    DeadlineTooSoon = 10,
+    /// Returned by `initialize` when `platform_config.fee_bps > MAX_PLATFORM_FEE_BPS`.
+    InvalidPlatformFee = 11,
+    /// Returned by `initialize` when `bonus_goal <= goal`.
+    InvalidBonusGoal = 12,
+
     /// Returned by `contribute` when `amount` is zero.
     ZeroAmount = 8,
     /// Returned by `contribute` when `amount` is below `min_contribution`.
     BelowMinimum = 9,
     /// Returned by `contribute` when the campaign is not active.
     CampaignNotActive = 10,
+
 }
 
 /// Interface for an external NFT contract used to mint contributor rewards.
@@ -199,18 +223,27 @@ pub struct CrowdfundContract;
 impl CrowdfundContract {
     /// Initializes a new crowdfunding campaign.
     ///
-    /// # Arguments
-    /// * `creator`            – The campaign creator's address.
-    /// * `token`              – The token contract address used for contributions.
-    /// * `goal`               – The funding goal (in the token's smallest unit).
-    /// * `deadline`           – The campaign deadline as a ledger timestamp.
-    /// * `min_contribution`   – The minimum contribution amount.
-    /// * `platform_config`    – Optional platform configuration (address and fee in basis points).
+    /// Delegates all validation and storage logic to
+    /// [`crowdfund_initialize_function::execute_initialize`].
     ///
-    /// # Panics
-    /// * If already initialized.
-    /// * If platform fee exceeds 10,000 (100%).
-    /// * If bonus goal is not greater than the primary goal.
+    /// # Arguments
+    /// * `admin`                  – Address authorized to upgrade the contract.
+    /// * `creator`                – The campaign creator's address (must authorize).
+    /// * `token`                  – The SEP-41 token contract address.
+    /// * `goal`                   – Funding goal in the token's smallest unit (>= 1).
+    /// * `deadline`               – Campaign deadline as a Unix timestamp (>= now + 60s).
+    /// * `min_contribution`       – Minimum contribution amount (>= 1).
+    /// * `platform_config`        – Optional platform fee configuration (fee_bps <= 10_000).
+    /// * `bonus_goal`             – Optional bonus goal threshold (must be > `goal`).
+    /// * `bonus_goal_description` – Optional description for the bonus goal.
+    ///
+    /// # Errors
+    /// * [`ContractError::AlreadyInitialized`]    – Contract was already initialized.
+    /// * [`ContractError::InvalidGoal`]           – `goal < 1`.
+    /// * [`ContractError::InvalidMinContribution`]– `min_contribution < 1`.
+    /// * [`ContractError::DeadlineTooSoon`]       – `deadline < now + 60`.
+    /// * [`ContractError::InvalidPlatformFee`]    – `fee_bps > 10_000`.
+    /// * [`ContractError::InvalidBonusGoal`]      – `bonus_goal <= goal`.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -223,6 +256,22 @@ impl CrowdfundContract {
         bonus_goal: Option<i128>,
         bonus_goal_description: Option<String>,
     ) -> Result<(), ContractError> {
+
+        execute_initialize(
+            &env,
+            InitParams {
+                admin,
+                creator,
+                token,
+                goal,
+                deadline,
+                min_contribution,
+                platform_config,
+                bonus_goal,
+                bonus_goal_description,
+            },
+        )
+
         if env.storage().instance().has(&DataKey::Creator) {
             return Err(ContractError::AlreadyInitialized);
         }
@@ -249,6 +298,7 @@ impl CrowdfundContract {
         );
 
         Ok(())
+
     }
 
     /// Returns the list of all contributor addresses.
