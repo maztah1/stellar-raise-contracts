@@ -26,6 +26,8 @@ mod refund_single_token_test;
 pub mod soroban_sdk_minor;
 #[cfg(test)]
 mod soroban_sdk_minor_test;
+#[path = "stellar_token_minter_test.rs"]
+mod stellar_token_minter_test;
 
 #[cfg(test)]
 mod auth_tests;
