@@ -89,6 +89,10 @@ fn setup_with_nft(
         &None,
         &None,
         &None,
+        &None,
+        &None,
+        &None,
+        &None,
     );
 
     let nft_id = env.register(BoundedMockNft, ());
@@ -129,6 +133,10 @@ fn setup_no_nft(
         &contribution,
         &deadline,
         &1,
+        &None,
+        &None,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -371,6 +379,10 @@ fn test_withdrawn_event_payout_reflects_fee_deduction() {
         &Some(config),
         &None,
         &None,
+        &None,
+        &None,
+        &None,
+        &None,
     );
 
     let contributor = Address::generate(&env);
@@ -423,6 +435,10 @@ fn test_withdraw_emits_fee_transferred_event() {
         &deadline,
         &1,
         &Some(config),
+        &None,
+        &None,
+        &None,
+        &None,
         &None,
         &None,
         &None,
