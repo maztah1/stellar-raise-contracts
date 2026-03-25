@@ -153,8 +153,6 @@ pub enum ContractError {
     NothingToRefund = 7,
     /// Returned when the campaign goal is below the minimum allowed threshold.
     GoalTooLow = 8,
-    /// Returned when the contribution amount is below the campaign minimum.
-    AmountTooLow = 9,
 }
 
 /// Interface for an external NFT contract used to mint contributor rewards.
