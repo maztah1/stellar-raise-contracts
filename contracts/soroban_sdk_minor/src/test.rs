@@ -22,9 +22,6 @@ fn test_init_stores_admin() {
     let admin = Address::generate(&env);
     client.init(&admin);
 
-    // Test initialization
-    client.init(&admin);
-
     assert_eq!(client.get_admin(), admin);
 }
 
