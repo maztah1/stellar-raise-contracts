@@ -338,4 +338,63 @@ mod tests {
     fn test_lockfile_version_4_invalid() {
         assert!(!validate_lockfile_version(4));
     }
+
+    // -----------------------------------------------------------------------
+    // audit_all_bounded — logging bounds / gas efficiency
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bounded_within_limit_returns_ok() {
+        let packages = vec![make_entry("svgo", "3.3.3", VALID_HASH, true)];
+        assert!(audit_all_bounded(&packages, &safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_empty_input_returns_ok() {
+        assert!(audit_all_bounded(&[], &safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_results_match_audit_all() {
+        let packages = vec![
+            make_entry("svgo", "3.3.2", VALID_HASH, true),
+            make_entry("svgo", "3.3.3", VALID_HASH, true),
+        ];
+        let bounded = audit_all_bounded(&packages, &safe_versions()).unwrap();
+        let unbounded = audit_all(&packages, &safe_versions());
+        assert_eq!(bounded, unbounded);
+    }
+
+    #[test]
+    fn test_bounded_exactly_at_limit_returns_ok() {
+        let packages: Vec<_> = (0..MAX_PACKAGES)
+            .map(|i| make_entry(&format!("pkg-{}", i), "1.0.0", VALID_HASH, false))
+            .collect();
+        assert!(audit_all_bounded(&packages, &safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_one_over_limit_returns_err() {
+        let packages: Vec<_> = (0..=MAX_PACKAGES)
+            .map(|i| make_entry(&format!("pkg-{}", i), "1.0.0", VALID_HASH, false))
+            .collect();
+        let err = audit_all_bounded(&packages, &safe_versions()).unwrap_err();
+        assert!(err.contains("MAX_PACKAGES"));
+        assert!(err.contains(&MAX_PACKAGES.to_string()));
+    }
+
+    #[test]
+    fn test_bounded_error_message_contains_actual_count() {
+        let count = MAX_PACKAGES + 10;
+        let packages: Vec<_> = (0..count)
+            .map(|i| make_entry(&format!("pkg-{}", i), "1.0.0", VALID_HASH, false))
+            .collect();
+        let err = audit_all_bounded(&packages, &safe_versions()).unwrap_err();
+        assert!(err.contains(&count.to_string()));
+    }
+
+    #[test]
+    fn test_max_packages_constant_is_positive() {
+        assert!(MAX_PACKAGES > 0);
+    }
 }

@@ -69,6 +69,7 @@ pub struct AuditResult {
 | `validate_integrity(integrity)` | Validates sha512 hash presence and prefix |
 | `audit_package(entry, min_safe_versions)` | Audits one package entry |
 | `audit_all(packages, min_safe_versions)` | Audits a full lockfile snapshot |
+| `audit_all_bounded(packages, min_safe_versions)` | Like `audit_all` but rejects inputs > `MAX_PACKAGES` |
 | `failing_results(results)` | Filters to only failing audit results |
 | `validate_lockfile_version(version)` | Accepts only lockfileVersion 2 or 3 |
 
@@ -130,7 +131,9 @@ The test suite in `npm_package_lock.test.rs` covers:
 - `failing_results` — 2 cases (filters correctly, empty when all pass)
 - `validate_lockfile_version` — 5 cases (2, 3, 1, 0, 4)
 
-Total: **42 test cases** — exceeds the 95% coverage requirement.
+- `audit_all_bounded` — 7 cases (within limit, empty, matches `audit_all`, exactly at limit, one over limit, error message content, constant positive)
+
+Total: **49 test cases** — exceeds the 95% coverage requirement.
 
 ---
 
