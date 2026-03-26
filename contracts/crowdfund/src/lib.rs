@@ -53,12 +53,7 @@ mod contract_state_size_test;
 #[cfg(test)]
 mod contribute_error_handling_tests;
 #[cfg(test)]
-n  bn ,#[path = "npm_package_lock_tn  bn ,#[path = "npm_package_lock_test.rs"]
-57
-n  bn ,#[path = "npm_package_lock_test.rs"]
-57
-est.rs"]
-57
+#[path = "npm_package_lock.test.rs"]
 mod npm_package_lock_test;
 
 #[cfg(test)]
@@ -1194,5 +1189,4 @@ impl CrowdfundContract {
     pub fn nft_contract(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::NFTContract)
     }
-}
 }
