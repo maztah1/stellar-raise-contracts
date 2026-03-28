@@ -98,7 +98,7 @@ When a smart contract error is detected:
 
 For other errors:
 - ⚠️ Warning icon
-- "Something went wrong" title
+- "Documentation Loading Error" title
 - General error message
 - Standard recovery options
 
@@ -106,6 +106,7 @@ For other errors:
 
 - **Try Again**: Resets error state and re-renders children
 - **Go Home**: Navigates to home page
+- **Dismiss**: Resets error state without resolving the underlying issue — use only for transient errors
 - **Error Details**: Expandable section in development mode
 
 ---
