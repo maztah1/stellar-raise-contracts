@@ -22,6 +22,7 @@ pub mod soroban_sdk_minor;
 pub mod stellar_token_minter;
 pub mod stream_processing_optimization;
 pub mod withdraw_event_emission;
+pub mod loop_optimization;
 pub mod security_compliance_automation;
 
 // ── Imports from modules ──────────────────────────────────────────────────────
@@ -81,6 +82,9 @@ mod stream_processing_optimization_test;
 #[cfg(test)]
 #[path = "security_compliance_automation.test.rs"]
 mod security_compliance_automation_test;
+#[cfg(test)]
+#[path = "loop_optimization.test.rs"]
+mod loop_optimization_test;
 
 // --- Constants ---
 const CONTRACT_VERSION: u32 = 3;
