@@ -2,20 +2,16 @@
 //!
 //! Covers:
 //! - Happy path: single and accumulated contributions
-//! - `CampaignNotActive` (code 16) — status guard fires first
-//! - `NegativeAmount` (code 17) — negative amount rejected
-//! - `ZeroAmount` (code 14) — zero amount rejected
-//! - `BelowMinimum` (code 15) — amount below min_contribution
-//! - `CampaignEnded` (code 2) — contribution after deadline
-//! - Exact-deadline boundary — accepted (strict `>` check)
-//! - `describe_error` helper coverage for all known codes
-//! - `is_retryable` — input errors retryable, state errors not
-//! - Diagnostic events emitted on each error path
-//! - No diagnostic event emitted on success
+//! - `CampaignNotActive` — status guard fires first
+//! - `NegativeAmount` — negative amount rejected (no diagnostic event)
+//! - `ZeroAmount` / `BelowMinimum` — amount validation
+//! - `CampaignEnded` — contribution after deadline; exact-deadline boundary
+//! - `describe_error` / `is_retryable` helpers
+//! - Diagnostic events on each logged error path
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token, Address, Env, Symbol,
+    testutils::{Address as _, Events, Ledger},
+    token, Address, Env, Symbol, TryFromVal,
 };
 
 use crate::{contribute_error_handling, ContractError, CrowdfundContract, CrowdfundContractClient};
@@ -41,7 +37,7 @@ fn setup() -> (Env, CrowdfundContractClient<'static>, Address) {
     let creator = Address::generate(&env);
     let contributor = Address::generate(&env);
 
-    asset_client.mint(&contributor, &i128::MAX);
+    sac.mint(&contributor, &i128::MAX);
 
     let now = env.ledger().timestamp();
     client.initialize(
@@ -62,7 +58,7 @@ fn setup() -> (Env, CrowdfundContractClient<'static>, Address) {
 
 /// Returns the last `contribute_error` event as `(variant_symbol, error_code)`.
 fn last_contribute_error_event(env: &Env) -> Option<(Symbol, u32)> {
-    let topic0_str = soroban_sdk::String::from_str(env, "contribute_error");
+    let want = soroban_sdk::String::from_str(env, "contribute_error");
     env.events()
         .all()
         .iter()
@@ -71,17 +67,17 @@ fn last_contribute_error_event(env: &Env) -> Option<(Symbol, u32)> {
             if topics.len() < 2 {
                 return None;
             }
-            let t0 = soroban_sdk::String::from_val(env, &topics.get(0)?).ok()?;
-            if t0 != topic0_str {
+            let t0 = soroban_sdk::String::try_from_val(env, &topics.get(0)?).ok()?;
+            if t0 != want {
                 return None;
             }
-            let t1 = Symbol::from_val(env, &topics.get(1)?).ok()?;
-            let code = u32::from_val(env, &data).ok()?;
+            let t1 = Symbol::try_from_val(env, &topics.get(1)?).ok()?;
+            let code = u32::try_from_val(env, &data).ok()?;
             Some((t1, code))
         })
 }
 
-// ── happy path ────────────────────────────────────────────────────────────────
+// ── happy path ───────────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_happy_path() {
@@ -102,7 +98,7 @@ fn contribute_accumulates_multiple_contributions() {
     assert_eq!(client.total_raised(), MIN * 2);
 }
 
-// ── CampaignNotActive (code 16) ───────────────────────────────────────────────
+// ── CampaignNotActive ────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_to_finalized_campaign_returns_not_active() {
@@ -118,23 +114,7 @@ fn contribute_to_finalized_campaign_returns_not_active() {
     );
 }
 
-#[test]
-fn contribute_to_succeeded_campaign_returns_not_active() {
-    let (env, client, contributor) = setup();
-    env.ledger().set_timestamp(env.ledger().timestamp() + 1);
-    client.contribute(&contributor, &GOAL);
-    env.ledger()
-        .set_timestamp(env.ledger().timestamp() + DEADLINE_OFFSET);
-    client.finalize();
-    client.withdraw();
-    let result = client.try_contribute(&contributor, &MIN);
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        ContractError::CampaignNotActive
-    );
-}
-
-// ── NegativeAmount (code 17) ──────────────────────────────────────────────────
+// ── NegativeAmount ─────────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_negative_amount_returns_negative_amount_error() {
@@ -144,7 +124,7 @@ fn contribute_negative_amount_returns_negative_amount_error() {
     assert_eq!(result.unwrap_err().unwrap(), ContractError::NegativeAmount);
 }
 
-// ── ZeroAmount (code 14) ──────────────────────────────────────────────────────
+// ── ZeroAmount ────────────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_zero_amount_returns_zero_amount_error() {
@@ -154,7 +134,7 @@ fn contribute_zero_amount_returns_zero_amount_error() {
     assert_eq!(result.unwrap_err().unwrap(), ContractError::ZeroAmount);
 }
 
-// ── BelowMinimum (code 15) ────────────────────────────────────────────────────
+// ── BelowMinimum ──────────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_below_minimum_returns_below_minimum_error() {
@@ -172,7 +152,7 @@ fn contribute_exactly_at_minimum_succeeds() {
     assert_eq!(client.total_raised(), MIN);
 }
 
-// ── CampaignEnded (code 2) ────────────────────────────────────────────────────
+// ── CampaignEnded ─────────────────────────────────────────────────────────────
 
 #[test]
 fn contribute_after_deadline_returns_campaign_ended() {
@@ -190,6 +170,22 @@ fn contribute_exactly_at_deadline_is_accepted() {
     env.ledger().set_timestamp(client.deadline());
     client.contribute(&contributor, &MIN);
     assert_eq!(client.total_raised(), MIN);
+}
+
+#[test]
+fn contribute_to_successful_campaign_returns_not_active() {
+    let (env, client, contributor) = setup();
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1);
+    client.contribute(&contributor, &GOAL);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + DEADLINE_OFFSET);
+    client.finalize();
+    client.withdraw();
+    let result = client.try_contribute(&contributor, &MIN);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        ContractError::CampaignNotActive
+    );
 }
 
 // ── error_codes constants ─────────────────────────────────────────────────────
@@ -268,6 +264,27 @@ fn is_retryable_state_errors_are_not_retryable() {
 }
 
 // ── diagnostic events ─────────────────────────────────────────────────────────
+
+/// Returns the last `contribute_error` event as `(variant_symbol, error_code)`.
+fn last_contribute_error_event(env: &Env) -> Option<(Symbol, u32)> {
+    let topic0_str = soroban_sdk::String::from_str(env, "contribute_error");
+    env.events()
+        .all()
+        .iter()
+        .rev()
+        .find_map(|(_, topics, data)| {
+            if topics.len() < 2 {
+                return None;
+            }
+            let t0 = soroban_sdk::String::from_val(env, &topics.get(0)?).ok()?;
+            if t0 != topic0_str {
+                return None;
+            }
+            let t1 = Symbol::from_val(env, &topics.get(1)?).ok()?;
+            let code = u32::from_val(env, &data).ok()?;
+            Some((t1, code))
+        })
+}
 
 #[test]
 fn error_event_emitted_on_campaign_ended() {
